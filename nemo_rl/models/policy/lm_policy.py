@@ -298,6 +298,22 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 "input_lengths_key": "input_lengths",
                 "sequence_length_pad_multiple": sequence_length_pad_multiple,
             }
+            # when virtual pipeline parallelism is enabled, the number of microbatches must
+            # be divisible by pp_size, so we need to pass the correct min_bin_count and bin_count_multiple.
+            dp_size = self.sharding_annotations.get_axis_size("data_parallel")
+            vpp_size = (
+                config["megatron_cfg"]["virtual_pipeline_model_parallel_size"] or 1
+            )
+            vpp_layout = config["megatron_cfg"]["pipeline_model_parallel_layout"]
+            make_num_microbatch_divisible_by = None
+            if vpp_size > 1 or vpp_layout is not None:
+                make_num_microbatch_divisible_by = dp_size * pp_size
+                self.sequence_packing_args["min_bin_count"] = (
+                    make_num_microbatch_divisible_by
+                )
+                self.sequence_packing_args["bin_count_multiple"] = (
+                    make_num_microbatch_divisible_by
+                )
             assert not config["dynamic_batching"]["enabled"], (
                 "Sequence Packing is exclusive of Dynamic Batching. Please disable Dynamic Batching"
             )
@@ -596,7 +612,6 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         micro_batch_size = mbs or self.cfg["train_micro_batch_size"]
         # Shard and replicate the batch
         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
-        pp_size = self.sharding_annotations.get_axis_size("pipeline_parallel")
         with timer.time("policy_training/sharding_data") if timer else nullcontext():
             if self.use_dynamic_batches:
                 self.dynamic_batching_args["max_tokens_per_microbatch"] = self.cfg[
@@ -611,11 +626,6 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 self.sequence_packing_args["max_tokens_per_microbatch"] = self.cfg[
                     "sequence_packing"
                 ]["train_mb_tokens"]
-                # when virtual pipeline parallelism is enabled, the number of microbatches must
-                # be divisible by pp_size, so we need to pass the correct min_bin_count and bin_count_multiple.
-                if len(self.model) > 1:
-                    self.sequence_packing_args["min_bin_count"] = dp_size * pp_size
-                    self.sequence_packing_args["bin_count_multiple"] = dp_size * pp_size
                 sharded_data, _ = data.shard_by_batch_size(
                     dp_size,
                     batch_size=batch_size,
