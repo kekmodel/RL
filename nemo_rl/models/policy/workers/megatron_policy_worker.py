@@ -274,14 +274,6 @@ class MegatronPolicyWorkerImpl(AbstractPolicyWorker, ColocatablePolicyInterface)
             group=parallel_state.get_data_parallel_group(),
         )
         num_global_batches = int(total_dataset_size.item()) // gbs
-        print(
-            f"rank {get_rank_safe()}: total_dataset_size: {total_dataset_size.item()}"
-        )
-        print(f"rank {get_rank_safe()}: gbs: {gbs}")
-        print(f"rank {get_rank_safe()}: num_global_batches: {num_global_batches}")
-        print(
-            f"rank {get_rank_safe()}: data.elem_counts_per_gb: {data.elem_counts_per_gb}"
-        )
 
         if eval_mode:
             ctx: AbstractContextManager[Any] = torch.no_grad()
@@ -1229,7 +1221,7 @@ class MegatronPolicyWorkerImpl(AbstractPolicyWorker, ColocatablePolicyInterface)
     @torch.no_grad()
     def move_model(
         self,
-        model,
+        model: torch.nn.Module | list[torch.nn.Module],
         device: str,
         move_params: bool = True,
         move_grads: bool = True,

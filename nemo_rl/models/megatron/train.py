@@ -15,6 +15,7 @@
 from collections import defaultdict
 from contextlib import nullcontext
 from functools import partial
+from itertools import tee
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -318,9 +319,8 @@ def megatron_forward_backward(
     # iterator over the same data.  The non-interleaved schedule accepts a length-1 list
     # and unwraps it itself.
     num_model_chunks = len(model) if isinstance(model, list) else 1
-    if not isinstance(data_iterator, list):
-        microbatches = list(data_iterator)
-        data_iterator = [iter(microbatches) for _ in range(num_model_chunks)]
+    if num_model_chunks > 1:
+        data_iterator = list(tee(data_iterator, num_model_chunks))
     return forward_backward_func(
         forward_step_func=forward_step,
         data_iterator=data_iterator,

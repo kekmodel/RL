@@ -596,8 +596,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         micro_batch_size = mbs or self.cfg["train_micro_batch_size"]
         # Shard and replicate the batch
         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
+        pp_size = self.sharding_annotations.get_axis_size("pipeline_parallel")
         with timer.time("policy_training/sharding_data") if timer else nullcontext():
-            pp_size = self.sharding_annotations.get_axis_size("pipeline_parallel")
             if self.use_dynamic_batches:
                 self.dynamic_batching_args["max_tokens_per_microbatch"] = self.cfg[
                     "dynamic_batching"
@@ -611,8 +611,11 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 self.sequence_packing_args["max_tokens_per_microbatch"] = self.cfg[
                     "sequence_packing"
                 ]["train_mb_tokens"]
-                self.sequence_packing_args["min_bin_count"] = dp_size * pp_size
-                self.sequence_packing_args["bin_count_multiple"] = dp_size * pp_size
+                # when virtual pipeline parallelism is enabled, the number of microbatches must
+                # be divisible by pp_size, so we need to pass the correct min_bin_count and bin_count_multiple.
+                if len(self.model) > 1:
+                    self.sequence_packing_args["min_bin_count"] = dp_size * pp_size
+                    self.sequence_packing_args["bin_count_multiple"] = dp_size * pp_size
                 sharded_data, _ = data.shard_by_batch_size(
                     dp_size,
                     batch_size=batch_size,

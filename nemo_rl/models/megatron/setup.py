@@ -1111,9 +1111,7 @@ def setup_reference_model_state(
             skip_load_to_model_and_opt=HAVE_FSDP2 and megatron_cfg.dist.use_torch_fsdp2,
         )
 
-    # reference_state_dict is a list of per-chunk state dicts (one per model chunk).
-    # With VPP, there are multiple chunks per PP rank; without VPP there is one.
-    reference_state_dict = dict()
+    reference_state_dict = {}
 
     if should_load_checkpoint or use_peft:
         for chunk in reference_model:
