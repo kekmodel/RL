@@ -213,6 +213,31 @@ class TestApplyParallelismConfig:
 
         assert model_cfg.context_parallel_size == 4
 
+    def test_virtual_pipeline_config(self):
+        """Test that virtual_pipeline_model_parallel_size is correctly applied."""
+        from nemo_rl.models.megatron.setup import _apply_parallelism_config
+
+        model_cfg = MagicMock()
+        config = {
+            "megatron_cfg": {
+                "tensor_model_parallel_size": 1,
+                "pipeline_model_parallel_size": 2,
+                "num_layers_in_first_pipeline_stage": None,
+                "num_layers_in_last_pipeline_stage": None,
+                "virtual_pipeline_model_parallel_size": 2,
+                "pipeline_model_parallel_layout": None,
+                "sequence_parallel": False,
+                "context_parallel_size": 1,
+            },
+            "sequence_packing": {"enabled": False},
+        }
+
+        _apply_parallelism_config(model_cfg, config)
+
+        assert model_cfg.pipeline_model_parallel_size == 2
+        assert model_cfg.virtual_pipeline_model_parallel_size == 2
+        assert model_cfg.pipeline_model_parallel_layout is None
+
 
 @pytest.mark.mcore
 class TestApplyMoeConfig:
