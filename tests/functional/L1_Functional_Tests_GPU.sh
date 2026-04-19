@@ -59,6 +59,7 @@ run_test fast uv run --no-sync bash ./tests/functional/grpo_megatron_eagle3_onli
 run_test      uv run --no-sync bash ./tests/functional/grpo_megatron_generation.sh
 run_test fast uv run --no-sync bash ./tests/functional/grpo_megatron_lora.sh
 run_test fast uv run --no-sync bash ./tests/functional/grpo_megatron_lora_async.sh
+run_test      uv run --no-sync bash ./tests/functional/grpo_megatron_with_vpp.sh
 run_test      uv run --no-sync bash ./tests/functional/grpo_multiple_dataloaders.sh
 run_test      uv run --no-sync bash ./tests/functional/grpo_multiturn.sh
 run_test      uv run --no-sync bash ./tests/functional/grpo_non_colocated.sh
@@ -72,6 +73,7 @@ run_test      uv run --no-sync bash ./tests/functional/sft_automodel_lora.sh
 run_test      uv run --no-sync bash ./tests/functional/sft_avlm.sh
 run_test      uv run --no-sync bash ./tests/functional/sft_megatron.sh
 run_test      uv run --no-sync bash ./tests/functional/sft_megatron_lora.sh
+run_test      uv run --no-sync bash ./tests/functional/sft_megatron_with_vpp.sh
 run_test      uv run --no-sync bash ./tests/functional/sft_resume_diamond.sh
 run_test      uv run --no-sync bash ./tests/functional/test_automodel_extra_installed_correctly.sh
 run_test fast uv run --no-sync bash ./tests/functional/test_converters.sh
