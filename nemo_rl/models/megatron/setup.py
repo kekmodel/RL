@@ -390,6 +390,9 @@ def _apply_parallelism_config(model_cfg: Any, config: PolicyConfig) -> None:
     model_cfg.pipeline_model_parallel_layout = config["megatron_cfg"][
         "pipeline_model_parallel_layout"
     ]
+    model_cfg.microbatch_group_size_per_vp_stage = config["megatron_cfg"][
+        "pipeline_model_parallel_size"
+    ]
 
     if model_cfg.context_parallel_size > 1:
         assert config["sequence_packing"]["enabled"], (
