@@ -115,7 +115,7 @@ def test_tool_call_matching_gold_state_terminates_with_full_reward():
     assert reward == 1.0
     assert next_meta is None
     assert stop is None
-    assert obs["role"] == "environment"
+    assert obs["role"] == "tool"
 
 
 def test_wrong_tool_call_does_not_terminate():

@@ -120,11 +120,12 @@ def _terminate(
     Optional[BankingMetadata],
     Optional[str],
 ]:
+    # Role ``tool`` is recognized by the Nemotron 3 Nano chat template and
+    # gets wrapped as ``<tool_response>...</tool_response>``. We pass plain
+    # text and let the template own the wrapping, so content composes
+    # correctly when the agent is re-prompted for the next turn.
     return (
-        {
-            "role": "environment",
-            "content": f"<environment>\n{message}\n</environment>\n",
-        },
+        {"role": "tool", "content": message},
         reward,
         True,
         None,
@@ -178,11 +179,10 @@ class BankingRunner:
         if action["name"] == "__malformed__":
             return (
                 {
-                    "role": "environment",
+                    "role": "tool",
                     "content": (
-                        "<environment>\nMalformed tool_call: expected "
+                        "Malformed tool_call: expected "
                         "<tool_call><function=NAME>...</function></tool_call>."
-                        "\n</environment>\n"
                     ),
                 },
                 0.0,
@@ -203,8 +203,8 @@ class BankingRunner:
 
         return (
             {
-                "role": "environment",
-                "content": f"<environment>\nApplied {action['name']}.\n</environment>\n",
+                "role": "tool",
+                "content": f"Applied {action['name']}.",
             },
             0.0,
             False,
