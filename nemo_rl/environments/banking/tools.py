@@ -105,6 +105,269 @@ def _open_or_enroll_product(state: KakaoBankState, args: dict[str, Any]) -> None
     _upsert(state, target_table, target_id, fields)
 
 
+def _first_present(args: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = args.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _update_card_state(state: KakaoBankState, args: dict[str, Any]) -> None:
+    order_id = _first_present(args, "order_id", "card_order_id")
+    if not order_id:
+        return
+    op = args.get("operation")
+    if op == "REJECT_NEW_ISSUE":
+        order_status = "REJECTED"
+    elif op in ("APPROVE_NEW_ISSUE", "APPROVE_REISSUE", "REISSUE_CARD", "ISSUE"):
+        order_status = "APPROVED"
+    elif op == "CANCEL":
+        order_status = "CANCELLED"
+    else:
+        order_status = op or "PROCESSED"
+    _upsert(
+        state,
+        "card_orders",
+        order_id,
+        {
+            "card_order_id": order_id,
+            "customer_id": args.get("customer_id"),
+            "card_id": args.get("card_id"),
+            "status": order_status,
+            "reason": args.get("reason"),
+            "operation": op,
+        },
+    )
+
+
+def _update_loan_contract_state(state: KakaoBankState, args: dict[str, Any]) -> None:
+    loan_id = _first_present(args, "loan_id", "target_id")
+    if not loan_id:
+        return
+    op = args.get("operation") or ""
+    updates: dict[str, Any] = {"operation": op}
+    if "ACCELERATE" in op or op == "IMMEDIATE_REPAYMENT":
+        updates["status"] = "ACCELERATED"
+        updates["acceleration_reason"] = args.get("reason")
+    elif op == "EXECUTE":
+        updates["status"] = "EXECUTED"
+    elif op == "WITHDRAW":
+        updates["status"] = "WITHDRAWN"
+        updates["withdrawal_reason"] = args.get("reason")
+    elif op == "SUSPEND":
+        updates["status"] = "SUSPENDED"
+    elif op == "REJECT_EXECUTION":
+        updates["status"] = "REJECTED"
+        updates["rejection_reason"] = args.get("reason")
+    if args.get("effective_at") is not None:
+        updates["effective_at"] = args["effective_at"]
+    _upsert(state, "loans", loan_id, updates)
+
+
+def _process_refinance_request(state: KakaoBankState, args: dict[str, Any]) -> None:
+    refi_id = args.get("refinance_id")
+    if not refi_id:
+        return
+    op = args.get("operation") or ""
+    if op.startswith("CANCEL"):
+        status = "CANCELLED"
+    elif op.startswith("COMPLETE"):
+        status = "COMPLETED"
+    else:
+        status = op or "PENDING"
+    _upsert(
+        state,
+        "refinance_requests",
+        refi_id,
+        {
+            "refinance_id": refi_id,
+            "status": status,
+            "old_loan_repayment_status": args.get("old_loan_repayment_status"),
+            "operation": op,
+        },
+    )
+
+
+def _request_maturity_or_extension(state: KakaoBankState, args: dict[str, Any]) -> None:
+    target_id = args.get("target_id")
+    if not target_id:
+        return
+    table = _find_record_table(state, target_id, ("deposit_contracts", "loans"))
+    if table is None:
+        return
+    op = args.get("operation") or ""
+    options = args.get("options") or {}
+    updates: dict[str, Any] = {"maturity_decision": op}
+    if op.startswith("REJECT"):
+        # Decision recorded; record's active status remains unchanged.
+        pass
+    elif "MATURE" in op or op == "MATURITY_CLOSE":
+        updates["status"] = "CLOSED"
+        if options.get("close_type"):
+            updates["close_type"] = options["close_type"]
+        else:
+            updates["close_type"] = "MATURITY"
+    elif "AUTO_CLOSE" in op:
+        updates["status"] = "CLOSED"
+        updates["close_type"] = "AUTO"
+    elif "EXTEND" in op:
+        updates["status"] = "EXTENDED"
+    _upsert(state, table, target_id, updates)
+
+
+def _execute_remittance_case(state: KakaoBankState, args: dict[str, Any]) -> None:
+    options = args.get("options") or {}
+    case_id = _first_present(args, "remittance_id") or options.get("remittance_id")
+    if not case_id:
+        return
+    _upsert(
+        state,
+        "remittance_cases",
+        case_id,
+        {
+            "remittance_id": case_id,
+            "customer_id": args.get("customer_id"),
+            "direction": args.get("direction"),
+            "amount": args.get("amount"),
+            "currency": args.get("currency"),
+            "country": args.get("country"),
+            "purpose_code": args.get("purpose_code"),
+        },
+    )
+
+
+def _deterministic_transaction_id(args: dict[str, Any]) -> str:
+    # A stable composite id so that agent and gold replay agree when the
+    # same canonical args are applied.
+    parts = [
+        str(args.get("transaction_type") or args.get("transfer_type") or ""),
+        str(
+            args.get("source_id")
+            or args.get("source_account_id")
+            or ""
+        ),
+        str(args.get("target_id") or ""),
+        str(args.get("amount") or ""),
+        str(args.get("currency") or ""),
+    ]
+    return "txn::" + "::".join(parts)
+
+
+def _execute_deposit_or_box_transfer(state: KakaoBankState, args: dict[str, Any]) -> None:
+    # At least one of target_id / source_id must exist for a transaction to
+    # have a meaningful composite id.
+    if not (args.get("target_id") or args.get("source_id") or args.get("source_account_id")):
+        return
+    txn_id = args.get("transaction_id") or _deterministic_transaction_id(args)
+    kind = args.get("transaction_type") or args.get("transfer_type") or ""
+    status = "REJECTED" if kind.startswith("REJECT") else "POSTED"
+    _upsert(
+        state,
+        "transactions",
+        txn_id,
+        {
+            "transaction_id": txn_id,
+            "source_id": args.get("source_id") or args.get("source_account_id"),
+            "target_id": args.get("target_id"),
+            "amount": args.get("amount"),
+            "currency": args.get("currency"),
+            "transaction_type": kind,
+            "status": status,
+            "reason": args.get("reason"),
+        },
+    )
+
+
+def _configure_auto_transfer(state: KakaoBankState, args: dict[str, Any]) -> None:
+    options = args.get("options") or {}
+    rule_id = _first_present(args, "auto_transfer_id", "existing_auto_transfer_id") or options.get("auto_transfer_id")
+    if not rule_id:
+        return
+    op = args.get("operation") or "CREATE"
+    if op == "CANCEL":
+        status = "CANCELLED"
+    elif op.startswith("REJECT"):
+        status = "REJECTED"
+    else:
+        status = args.get("status") or "ACTIVE"
+    _upsert(
+        state,
+        "auto_transfer_rules",
+        rule_id,
+        {
+            "auto_transfer_id": rule_id,
+            "source_account_id": args.get("source_account_id"),
+            "target_id": args.get("target_id"),
+            "amount_krw": args.get("amount_krw"),
+            "status": status,
+            "operation": op,
+        },
+    )
+
+
+def _request_interest_payment(state: KakaoBankState, args: dict[str, Any]) -> None:
+    target_id = args.get("target_id")
+    if not target_id:
+        return
+    options = args.get("options") or {}
+    txn_id = f"interest::{target_id}::{options.get('interest_amount_krw', '')}"
+    _upsert(
+        state,
+        "transactions",
+        txn_id,
+        {
+            "transaction_id": txn_id,
+            "target_id": target_id,
+            "transaction_type": "INTEREST_PAYMENT",
+            "amount": options.get("interest_amount_krw"),
+            "status": "POSTED",
+        },
+    )
+
+
+def _create_loan_application(state: KakaoBankState, args: dict[str, Any]) -> None:
+    app_id = args.get("application_id")
+    if not app_id:
+        return
+    _upsert(
+        state,
+        "loan_applications",
+        app_id,
+        {
+            "application_id": app_id,
+            "customer_id": args.get("customer_id"),
+            "product_name": args.get("product_name"),
+            "requested_amount_krw": args.get("requested_amount_krw"),
+            "purpose": args.get("purpose"),
+            "partner_id": args.get("partner_id"),
+            "comparison_id": args.get("comparison_id"),
+            "status": args.get("expected_status") or args.get("status", "SUBMITTED"),
+        },
+    )
+
+
+def _file_dispute_or_objection(state: KakaoBankState, args: dict[str, Any]) -> None:
+    customer_id = args.get("customer_id")
+    target_id = args.get("target_id")
+    if not (customer_id and target_id):
+        return
+    dispute_id = args.get("dispute_id") or f"dispute::{customer_id}::{target_id}"
+    _upsert(
+        state,
+        "disputes",
+        dispute_id,
+        {
+            "dispute_id": dispute_id,
+            "customer_id": customer_id,
+            "target_type": args.get("target_type"),
+            "target_id": target_id,
+            "reason": args.get("reason"),
+            "status": args.get("status", "FILED"),
+        },
+    )
+
+
 HANDLERS: dict[str, Callable[[KakaoBankState, dict[str, Any]], None]] = {
     # Read tools: state-invariant by construction.
     "KB_search": _noop,
@@ -113,6 +376,16 @@ HANDLERS: dict[str, Callable[[KakaoBankState, dict[str, Any]], None]] = {
     # Write tools.
     "close_account_or_service": _close_account_or_service,
     "open_or_enroll_product": _open_or_enroll_product,
+    "update_card_state": _update_card_state,
+    "update_loan_contract_state": _update_loan_contract_state,
+    "process_refinance_request": _process_refinance_request,
+    "request_maturity_or_extension": _request_maturity_or_extension,
+    "execute_remittance_case": _execute_remittance_case,
+    "execute_deposit_or_box_transfer": _execute_deposit_or_box_transfer,
+    "configure_auto_transfer": _configure_auto_transfer,
+    "request_interest_payment": _request_interest_payment,
+    "create_loan_application": _create_loan_application,
+    "file_dispute_or_objection": _file_dispute_or_objection,
 }
 
 
