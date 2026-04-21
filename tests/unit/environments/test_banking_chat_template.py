@@ -219,6 +219,67 @@ def test_tool_response_wrapping_and_fresh_think_via_chat_template():
 @pytest.mark.skipif(
     not _TOKENIZER_DIR, reason="NEMOTRON_TOKENIZER_DIR not set; skipping integration."
 )
+def test_new_user_turn_strips_all_prior_reasoning_but_keeps_tool_calls():
+    """Once a new user turn appears, every assistant ``reasoning_content``
+    from BEFORE that last user turn is stripped from the rendered
+    history — but the tool_call XML itself is preserved so the DB state
+    trace remains visible to the model.
+    """
+    from transformers import AutoTokenizer  # type: ignore
+
+    tok = AutoTokenizer.from_pretrained(_TOKENIZER_DIR)
+    messages = [
+        {"role": "user", "content": "round1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "OLD_REASONING_1",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "A", "arguments": {"x": "1"}}}
+            ],
+        },
+        {"role": "tool", "content": "r1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "OLD_REASONING_2",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "B", "arguments": {"y": "2"}}}
+            ],
+        },
+        {"role": "tool", "content": "r2"},
+        # New user turn pushes the "last_user_idx" forward; everything
+        # above loses its reasoning in the rendered history.
+        {"role": "user", "content": "round2"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "CURRENT_REASONING",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "C", "arguments": {"z": "3"}}}
+            ],
+        },
+        {"role": "tool", "content": "r3"},
+    ]
+    rendered = tok.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    # Prior-round reasoning is gone.
+    assert "OLD_REASONING_1" not in rendered
+    assert "OLD_REASONING_2" not in rendered
+    # Current-round reasoning (after last user) is kept so the model can
+    # continue its in-progress thinking chain.
+    assert "CURRENT_REASONING" in rendered
+    # Tool calls themselves are still part of the rendered trace — the
+    # DB-state history remains visible; only <think> blocks are pruned.
+    assert "<function=A>" in rendered
+    assert "<function=B>" in rendered
+    assert "<function=C>" in rendered
+
+
+@pytest.mark.skipif(
+    not _TOKENIZER_DIR, reason="NEMOTRON_TOKENIZER_DIR not set; skipping integration."
+)
 def test_prior_turn_thinking_is_truncated_by_default():
     """With ``truncate_history_thinking`` default True, any reasoning from
     assistant turns BEFORE the last user message is stripped out of the
