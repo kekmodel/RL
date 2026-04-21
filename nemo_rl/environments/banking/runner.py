@@ -18,10 +18,28 @@ Kept free of ``ray`` and ``torch`` imports so that the turn logic can be
 exercised directly by unit tests. The Ray-wrapped actor in
 ``environment.py`` delegates each per-turn step to
 :meth:`BankingRunner.process_turn`.
+
+The tool-call wire format is the Nemotron 3 Nano / Qwen3-coder XML shape,
+mirroring ``megatron.core.tokenizers.text.parsers.qwen3_coder_tool_parser``:
+
+    <tool_call>
+    <function=tool_name>
+    <parameter=key>value</parameter>
+    ...
+    </function>
+    </tool_call>
+
+Parameter values are free-form text. They are coerced via
+:func:`json.loads` and, on failure, :func:`ast.literal_eval` before
+falling back to the raw string. This matches the Qwen3-coder parser's
+no-schema path and allows numbers, booleans, nulls, and nested JSON to
+round-trip faithfully into the tool dispatcher.
 """
 
+import ast
 import copy
 import json
+import re
 from typing import Any, Optional, TypedDict
 
 from nemo_rl.environments.banking.state import KakaoBankState, canonical_hash
@@ -35,25 +53,61 @@ class BankingMetadata(TypedDict):
     max_turns: int
 
 
-_ACTION_STOP = ["</action>"]
+_TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_FUNCTION_RE = re.compile(r"<function=(.*?)</function>", re.DOTALL)
+_PARAMETER_RE = re.compile(
+    r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
+)
+
+_ACTION_STOP = ["</tool_call>"]
+
+
+def _coerce_param_value(raw: str) -> Any:
+    """Parse ``raw`` as JSON, then as a Python literal, else return the
+    trimmed string. Matches the no-schema path of Qwen3CoderToolParser.
+    """
+    stripped = raw
+    if stripped.startswith("\n"):
+        stripped = stripped[1:]
+    if stripped.endswith("\n"):
+        stripped = stripped[:-1]
+    if stripped.strip().lower() == "null":
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(stripped)
+    except (ValueError, SyntaxError, TypeError):
+        pass
+    return stripped
 
 
 def _parse_action(text: str) -> Optional[dict[str, Any]]:
-    prefix = "<action>"
-    suffix = "</action>"
-    start = text.rfind(prefix)
-    if start == -1:
+    """Extract the last ``<tool_call>`` block. Returns ``None`` when the
+    message contains no tool call at all (the signal that the agent has
+    finished acting and is addressing the user).
+    """
+    tool_calls = _TOOL_CALL_RE.findall(text)
+    if not tool_calls:
         return None
-    end = text.find(suffix, start + len(prefix))
-    if end == -1:
-        return None
-    try:
-        payload = json.loads(text[start + len(prefix) : end].strip())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict) or "name" not in payload:
-        return None
-    return payload
+    function_match = _FUNCTION_RE.search(tool_calls[-1])
+    if not function_match:
+        return {"name": "__malformed__", "arguments": {}}
+    body = function_match.group(1)
+    name_end = body.find(">")
+    if name_end == -1:
+        return {"name": "__malformed__", "arguments": {}}
+    name = body[:name_end]
+    params_body = body[name_end + 1 :]
+    arguments: dict[str, Any] = {}
+    for match in _PARAMETER_RE.findall(params_body):
+        sep = match.find(">")
+        if sep == -1:
+            continue
+        arguments[match[:sep]] = _coerce_param_value(match[sep + 1 :])
+    return {"name": name, "arguments": arguments}
 
 
 def _terminate(
@@ -111,14 +165,24 @@ class BankingRunner:
             last_content = str(message_log[-1]["content"])
 
         action = _parse_action(last_content)
+
+        # No tool call at all: the agent is addressing the user; terminate.
         if action is None:
+            reward = (
+                1.0
+                if canonical_hash(metadata["predicted_state"]) == gold_hash
+                else 0.0
+            )
+            return _terminate(reward, "Assistant finished without further tool use.")
+
+        if action["name"] == "__malformed__":
             return (
                 {
                     "role": "environment",
                     "content": (
-                        "<environment>\nInvalid response: expected "
-                        "<action>{\"name\": ..., \"arguments\": ...}</action>"
-                        " JSON.\n</environment>\n"
+                        "<environment>\nMalformed tool_call: expected "
+                        "<tool_call><function=NAME>...</function></tool_call>."
+                        "\n</environment>\n"
                     ),
                 },
                 0.0,
@@ -131,14 +195,6 @@ class BankingRunner:
                 },
                 None,
             )
-
-        if action.get("name") == "done":
-            reward = (
-                1.0
-                if canonical_hash(metadata["predicted_state"]) == gold_hash
-                else 0.0
-            )
-            return _terminate(reward, "done")
 
         next_state = copy.deepcopy(metadata["predicted_state"])
         apply_action(next_state, action)
